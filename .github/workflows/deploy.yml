@@ -1,43 +1,29 @@
 name: Build and Deploy to VPS
-# WHEN does this run?
+
 on:
   push:
-    branches: [main]   # Only when code is pushed to main branch
+    branches: [main]
 
-# WHAT does it do?
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest   # GitHub provides a fresh Ubuntu VM
-
- steps:
-      # Step 1: Get the code
+    runs-on: ubuntu-latest
+    steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        # This clones your repo into the GitHub Actions VM
 
-      # Step 2: Log in to GitHub Container Registry
       - name: Login to GHCR
         run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-        # github.actor = your GitHub username (automatic)
-        # Logs in so we can push Docker images
 
- # Step 3: Build the Docker image
       - name: Build Docker image
         run: |
           docker build -t ghcr.io/${{ github.repository }}/api:latest ./api
           docker build -t ghcr.io/${{ github.repository }}/api:${{ github.sha }} ./api
-        # Builds TWO tags:
-        #   :latest  = always points to newest version
-        #   :abc123  = specific commit hash (for rollback)
 
-      # Step 4: Push image to registry
       - name: Push Docker image
         run: |
           docker push ghcr.io/${{ github.repository }}/api:latest
           docker push ghcr.io/${{ github.repository }}/api:${{ github.sha }}
-        # Uploads the built image to GHCR storage
 
-  # Step 5: Deploy to VPS via SSH
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1
         with:
@@ -48,5 +34,3 @@ jobs:
             cd /home/mohammed/compose-stack
             docker compose pull
             docker compose up -d
-        # Connects to your VPS via SSH
-        # Pulls the new image and restarts containers
