@@ -14,7 +14,7 @@ builder.Services.AddSingleton(new ElasticsearchClient(settings));
 
 var app = builder.Build();
 
-app.MapGet("/", () => "Elastic API v3.0 - Deployed by deployer!");
+app.MapGet("/", () => "Elastic API v4.0 - Production Ready!");
 
 app.MapGet("/users/search/{city}", async (string city, ElasticsearchClient client) =>
 {
