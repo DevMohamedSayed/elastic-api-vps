@@ -23,7 +23,7 @@ services:
       - elasticsearch
 
   api:
-    image: ghcr.io/devmohamedsayed/elastic-api-vps/api:latest
+    build: ./api
     environment:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
     ports:
@@ -39,6 +39,8 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf
       - /etc/letsencrypt:/etc/letsencrypt:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - api
 
