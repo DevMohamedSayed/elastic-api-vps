@@ -1,0 +1,6 @@
+api/bin/
+api/obj/
+.env
+*.bak.*
+.DS_Store
+Thumbs.db
