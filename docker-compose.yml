@@ -23,7 +23,7 @@ services:
       - elasticsearch
 
   api:
-    build: ./api
+    image: ghcr.io/devmohamedsayed/elastic-api-vps/api:latest
     environment:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
     ports:
