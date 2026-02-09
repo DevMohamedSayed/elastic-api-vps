@@ -1,20 +1,68 @@
 using System.Text.Json;
 using Elastic.Clients.Elasticsearch;
 using Elastic.Transport;
+using Microsoft.EntityFrameworkCore;
+using Prometheus;
+using Amazon.S3;
+using Amazon.S3.Model;
 
+// ── App Setup ──────────────────────────────────────────────────
 var builder = WebApplication.CreateBuilder(args);
 
+// Elasticsearch
 var esUrl = Environment.GetEnvironmentVariable("ELASTICSEARCH_URL") ?? "http://localhost:9200";
-
-var settings = new ElasticsearchClientSettings(new Uri(esUrl))
+var esSettings = new ElasticsearchClientSettings(new Uri(esUrl))
     .Authentication(new BasicAuthentication("elastic", "elastic123"))
     .DisableDirectStreaming();
+builder.Services.AddSingleton(new ElasticsearchClient(esSettings));
 
-builder.Services.AddSingleton(new ElasticsearchClient(settings));
+// SQL Server via EF Core
+var sqlConn = Environment.GetEnvironmentVariable("SQL_CONNECTION")
+    ?? "Server=localhost;Database=ProjectsDb;User Id=sa;Password=SqlServer2026!;TrustServerCertificate=true";
+builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlServer(sqlConn));
+
+// MinIO (S3-compatible) client
+var minioEndpoint = Environment.GetEnvironmentVariable("MINIO_ENDPOINT") ?? "localhost:9002";
+var minioAccessKey = Environment.GetEnvironmentVariable("MINIO_ACCESS_KEY") ?? "minioadmin";
+var minioSecretKey = Environment.GetEnvironmentVariable("MINIO_SECRET_KEY") ?? "Minio2026Secret!";
+
+builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client(
+    minioAccessKey,
+    minioSecretKey,
+    new AmazonS3Config
+    {
+        ServiceURL = $"http://{minioEndpoint}",
+        ForcePathStyle = true
+    }));
 
 var app = builder.Build();
 
-app.MapGet("/", () => "Elastic API v4.0 - Production Ready!");
+// Auto-create database tables from model
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.EnsureCreated();
+}
+
+// Ensure MinIO bucket exists
+using (var scope = app.Services.CreateScope())
+{
+    var s3 = scope.ServiceProvider.GetRequiredService<IAmazonS3>();
+    try
+    {
+        await s3.PutBucketAsync(new PutBucketRequest { BucketName = "uploads" });
+    }
+    catch (AmazonS3Exception ex) when (ex.ErrorCode == "BucketAlreadyOwnedByYou" || ex.ErrorCode == "BucketAlreadyExists")
+    {
+        // Bucket already exists
+    }
+}
+
+// Prometheus metrics
+app.UseHttpMetrics();
+
+// ── Elasticsearch Endpoints (existing) ────────────────────────
+app.MapGet("/", () => "Elastic API v5.0 - SQL Server + MinIO + Elasticsearch");
 
 app.MapGet("/users/search/{city}", async (string city, ElasticsearchClient client) =>
 {
@@ -49,4 +97,118 @@ app.MapGet("/logs/errors", async (ElasticsearchClient client) =>
         : Results.Problem("ES query failed: " + response.DebugInformation);
 });
 
+// ── SQL Server CRUD Endpoints (new) ───────────────────────────
+app.MapGet("/projects", async (AppDbContext db) =>
+    await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync());
+
+app.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
+    await db.Projects.FindAsync(id) is Project p
+        ? Results.Ok(p)
+        : Results.NotFound(new { error = "Project not found" }));
+
+app.MapPost("/projects", async (Project project, AppDbContext db) =>
+{
+    project.CreatedAt = DateTime.UtcNow;
+    db.Projects.Add(project);
+    await db.SaveChangesAsync();
+    return Results.Created($"/projects/{project.Id}", project);
+});
+
+app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db) =>
+{
+    var project = await db.Projects.FindAsync(id);
+    if (project is null) return Results.NotFound(new { error = "Project not found" });
+
+    project.Name = input.Name;
+    project.Description = input.Description;
+    project.Status = input.Status;
+    project.UpdatedAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+    return Results.Ok(project);
+});
+
+app.MapDelete("/projects/{id}", async (int id, AppDbContext db) =>
+{
+    var project = await db.Projects.FindAsync(id);
+    if (project is null) return Results.NotFound(new { error = "Project not found" });
+
+    db.Projects.Remove(project);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { message = "Deleted", id });
+});
+
+// ── MinIO File Endpoints (new) ────────────────────────────────
+app.MapPost("/files/upload", async (HttpRequest request, IAmazonS3 s3) =>
+{
+    var form = await request.ReadFormAsync();
+    var file = form.Files.FirstOrDefault();
+    if (file is null) return Results.BadRequest(new { error = "No file provided" });
+
+    using var stream = file.OpenReadStream();
+    var key = $"{Guid.NewGuid()}-{file.FileName}";
+
+    await s3.PutObjectAsync(new PutObjectRequest
+    {
+        BucketName = "uploads",
+        Key = key,
+        InputStream = stream,
+        ContentType = file.ContentType
+    });
+
+    return Results.Ok(new { message = "Uploaded", key, size = file.Length });
+});
+
+app.MapGet("/files", async (IAmazonS3 s3) =>
+{
+    var response = await s3.ListObjectsV2Async(new ListObjectsV2Request
+    {
+        BucketName = "uploads"
+    });
+    return Results.Ok(response.S3Objects.Select(o => new
+    {
+        o.Key,
+        o.Size,
+        o.LastModified
+    }));
+});
+
+app.MapGet("/files/{key}", async (string key, IAmazonS3 s3) =>
+{
+    try
+    {
+        var response = await s3.GetObjectAsync("uploads", key);
+        return Results.File(response.ResponseStream, response.Headers.ContentType, key);
+    }
+    catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+    {
+        return Results.NotFound(new { error = "File not found" });
+    }
+});
+
+app.MapDelete("/files/{key}", async (string key, IAmazonS3 s3) =>
+{
+    await s3.DeleteObjectAsync("uploads", key);
+    return Results.Ok(new { message = "Deleted", key });
+});
+
+// Prometheus metrics endpoint
+app.MapMetrics();
+
 app.Run("http://0.0.0.0:5000");
+
+// ── Classes must be AFTER top-level statements in C# ──────────
+public class Project
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string Status { get; set; } = "Active";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? UpdatedAt { get; set; }
+}
+
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    public DbSet<Project> Projects => Set<Project>();
+}
