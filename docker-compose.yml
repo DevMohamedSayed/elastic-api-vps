@@ -51,6 +51,24 @@ services:
       - minio_data:/data
     command: server /data --console-address ":9001"
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=RabbitMQ2026!
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
   api:
     build: ./api
     environment:
@@ -59,6 +77,10 @@ services:
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=Minio2026Secret!
+      - REDIS_CONNECTION=redis:6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=RabbitMQ2026!
     ports:
       - "5000:5000"
     depends_on:
@@ -123,5 +145,7 @@ volumes:
   esdata:
   sqldata:
   minio_data:
+  redis_data:
+  rabbitmq_data:
   prometheus_data:
   grafana_data:
