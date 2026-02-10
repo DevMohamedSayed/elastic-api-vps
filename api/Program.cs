@@ -103,7 +103,8 @@ var app = builder.Build();
 
 // ── Middleware Pipeline ────────────────────────────────────────
 app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "VPS API v6.0"));
+app.UseSwaggerUI(c => c.SwaggerEndpoint("v1/swagger.json", "VPS API v6.0"));
+
 
 app.UseAuthentication();
 app.UseAuthorization();
