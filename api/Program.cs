@@ -196,6 +196,23 @@ app.MapHealthChecks("/health");
 // ── Public Endpoints ──────────────────────────────────────────
 app.MapGet("/", () => "Elastic API v7.0 - Redis + RabbitMQ + Serilog")
     .WithTags("General");
+app.MapGet("/robots.txt", () =>
+{
+    var content = "User-agent: *\nAllow: /\nDisallow: /api/swagger\nDisallow: /grafana/\nDisallow: /kibana/\n\nSitemap: https://mohamedsayed.site/api/sitemap.xml";
+    return Results.Text(content, "text/plain");
+}).WithTags("SEO");
+
+app.MapGet("/sitemap.xml", async (AppDbContext db) =>
+{
+    var projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
+    var urls = projects.Select(p =>
+        $"  <url>\n    <loc>https://mohamedsayed.site/projects/{p.Slug}</loc>\n    <lastmod>{p.UpdatedAt?.ToString("yyyy-MM-dd") ?? p.CreatedAt.ToString("yyyy-MM-dd")}</lastmod>\n    <changefreq>weekly</changefreq>\n  </url>");
+
+    var sitemap = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url>\n    <loc>https://mohamedsayed.site</loc>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>\n{string.Join("\n", urls)}\n</urlset>";
+
+    return Results.Text(sitemap, "application/xml");
+}).WithTags("SEO");
+
 
 app.MapGet("/users/search/{city}", async (string city, ElasticsearchClient client) =>
 {
@@ -247,6 +264,7 @@ app.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
 app.MapPost("/projects", async (Project project, AppDbContext db, IDistributedCache cache, IConnection rabbit) =>
 {
     project.CreatedAt = DateTime.UtcNow;
+    project.Slug = SlugHelper.GenerateSlug(project.Name);
     db.Projects.Add(project);
     await db.SaveChangesAsync();
 
@@ -262,6 +280,29 @@ app.MapPost("/projects", async (Project project, AppDbContext db, IDistributedCa
 
     return Results.Created($"/projects/{project.Id}", project);
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+
+app.MapGet("/projects/by-slug/{slug}", async (string slug, AppDbContext db) =>
+    await db.Projects.FirstOrDefaultAsync(p => p.Slug == slug) is Project p
+        ? Results.Ok(p)
+        : Results.NotFound(new { error = "Project not found" }))
+    .WithTags("Projects");
+
+app.MapGet("/projects/{slug}/meta", async (string slug, AppDbContext db) =>
+{
+    var project = await db.Projects.FirstOrDefaultAsync(p => p.Slug == slug);
+    if (project is null) return Results.NotFound();
+    var jsonLd = new
+    {
+        context = "https://schema.org",
+        type = "SoftwareApplication",
+        name = project.Name,
+        description = project.Description,
+        url = $"https://mohamedsayed.site/projects/{project.Slug}",
+        dateCreated = project.CreatedAt.ToString("yyyy-MM-dd"),
+        applicationCategory = "DeveloperApplication"
+    };
+    return Results.Ok(jsonLd);
+}).WithTags("SEO");
 
 app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db, IDistributedCache cache) =>
 {
@@ -331,10 +372,19 @@ app.MapDelete("/files/{key}", async (string key, IAmazonS3 s3) =>
 app.MapMetrics();
 app.Run("http://0.0.0.0:5000");
 
+public static class SlugHelper
+{
+    public static string GenerateSlug(string text)
+    {
+        return System.Text.RegularExpressions.Regex.Replace(text.ToLower(), @"[^a-z0-9]+", "-").Trim('-');
+    }
+}
+
 // ── Models ────────────────────────────────────────────────────
 public class Project
 {
     public int Id { get; set; }
+    public string Slug { get; set; } = "";
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
     public string Status { get; set; } = "Active";
