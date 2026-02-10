@@ -81,6 +81,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_USER=admin
       - RABBITMQ_PASS=RabbitMQ2026!
+      - JWT_SECRET=MyS3cur3K3y!2026VPS-Pr0ject!!XYZ
     ports:
       - "5000:5000"
     depends_on:
