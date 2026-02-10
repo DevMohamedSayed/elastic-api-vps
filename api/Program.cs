@@ -9,12 +9,32 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Distributed;
 using Prometheus;
 using Amazon.S3;
 using Amazon.S3.Model;
+using RabbitMQ.Client;
+using Serilog;
+using Serilog.Sinks.Elasticsearch;
 
-// ── App Setup ──────────────────────────────────────────────────
+// ── Serilog Setup (replaces default logger) ────────────────────
+var esUrl = Environment.GetEnvironmentVariable("ELASTICSEARCH_URL") ?? "http://localhost:9200";
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .WriteTo.Elasticsearch(new ElasticsearchSinkOptions(new Uri(esUrl))
+    {
+        AutoRegisterTemplate = true,
+        IndexFormat = "api-logs-{0:yyyy.MM.dd}",
+        ModifyConnectionSettings = conn =>
+            conn.BasicAuthentication("elastic", "elastic123")
+    })
+    .Enrich.WithProperty("Application", "ElasticApi")
+    .CreateLogger();
+
 var builder = WebApplication.CreateBuilder(args);
+builder.Host.UseSerilog();
 
 var jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET") ?? "MyS3cur3K3y!2026VPS-Pr0ject!!XYZ";
 var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
@@ -23,7 +43,7 @@ var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new() { Title = "Mohamed Sayed - VPS API", Version = "v6.0" });
+    c.SwaggerDoc("v1", new() { Title = "Mohamed Sayed - VPS API", Version = "v7.0" });
     c.AddSecurityDefinition("Bearer", new()
     {
         Description = "Enter your JWT token",
@@ -70,19 +90,18 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
-// Elasticsearch
-var esUrl = Environment.GetEnvironmentVariable("ELASTICSEARCH_URL") ?? "http://localhost:9200";
+// Elasticsearch client
 var esSettings = new ElasticsearchClientSettings(new Uri(esUrl))
     .Authentication(new BasicAuthentication("elastic", "elastic123"))
     .DisableDirectStreaming();
 builder.Services.AddSingleton(new ElasticsearchClient(esSettings));
 
-// SQL Server via EF Core
+// SQL Server
 var sqlConn = Environment.GetEnvironmentVariable("SQL_CONNECTION")
     ?? "Server=localhost;Database=ProjectsDb;User Id=sa;Password=SqlServer2026!;TrustServerCertificate=true";
 builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlServer(sqlConn));
 
-// MinIO (S3-compatible) client
+// MinIO
 var minioEndpoint = Environment.GetEnvironmentVariable("MINIO_ENDPOINT") ?? "localhost:9002";
 var minioAccessKey = Environment.GetEnvironmentVariable("MINIO_ACCESS_KEY") ?? "minioadmin";
 var minioSecretKey = Environment.GetEnvironmentVariable("MINIO_SECRET_KEY") ?? "Minio2026Secret!";
@@ -90,9 +109,31 @@ builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client(
     minioAccessKey, minioSecretKey,
     new AmazonS3Config { ServiceURL = $"http://{minioEndpoint}", ForcePathStyle = true }));
 
-// Redis connection string for health check
+// ── NEW: Redis Cache ───────────────────────────────────────────
 var redisConn = Environment.GetEnvironmentVariable("REDIS_CONNECTION") ?? "localhost:6379";
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = redisConn;
+    options.InstanceName = "api_";
+});
 
+// ── NEW: RabbitMQ Connection ───────────────────────────────────
+var rabbitHost = Environment.GetEnvironmentVariable("RABBITMQ_HOST") ?? "localhost";
+var rabbitUser = Environment.GetEnvironmentVariable("RABBITMQ_USER") ?? "admin";
+var rabbitPass = Environment.GetEnvironmentVariable("RABBITMQ_PASS") ?? "RabbitMQ2026!";
+
+builder.Services.AddSingleton<IConnection>(_ =>
+{
+    var factory = new ConnectionFactory
+    {
+        HostName = rabbitHost,
+        UserName = rabbitUser,
+        Password = rabbitPass
+    };
+    return factory.CreateConnection();
+});
+
+builder.Services.AddHostedService<ProjectEventConsumer>();
 // Health Checks
 builder.Services.AddHealthChecks()
     .AddSqlServer(sqlConn, name: "sqlserver")
@@ -101,11 +142,10 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
-// ── Middleware Pipeline ────────────────────────────────────────
+// Middleware
 app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("v1/swagger.json", "VPS API v6.0"));
-
-
+app.UseSwaggerUI(c => c.SwaggerEndpoint("v1/swagger.json", "VPS API v7.0"));
+app.UseSerilogRequestLogging();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
@@ -126,10 +166,9 @@ using (var scope = app.Services.CreateScope())
     catch (AmazonS3Exception ex) when (ex.ErrorCode == "BucketAlreadyOwnedByYou" || ex.ErrorCode == "BucketAlreadyExists") { }
 }
 
-// ── Auth Endpoint ─────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────
 app.MapPost("/auth/login", (LoginRequest request) =>
 {
-    // Simple demo auth — production would check a database
     if (request.Username == "admin" && request.Password == "Admin2026!")
     {
         var claims = new[]
@@ -145,55 +184,59 @@ app.MapPost("/auth/login", (LoginRequest request) =>
             signingCredentials: new SigningCredentials(
                 new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256)
         );
+        Log.Information("User {Username} logged in", request.Username);
         return Results.Ok(new { token = new JwtSecurityTokenHandler().WriteToken(token) });
     }
+    Log.Warning("Failed login attempt for {Username}", request.Username);
     return Results.Unauthorized();
 }).WithTags("Auth");
 
-// ── Health Check ──────────────────────────────────────────────
 app.MapHealthChecks("/health");
 
-// ── Public Endpoints (no auth needed) ─────────────────────────
-app.MapGet("/", () => "Elastic API v6.0 - JWT + Rate Limiting + Health Checks")
+// ── Public Endpoints ──────────────────────────────────────────
+app.MapGet("/", () => "Elastic API v7.0 - Redis + RabbitMQ + Serilog")
     .WithTags("General");
 
 app.MapGet("/users/search/{city}", async (string city, ElasticsearchClient client) =>
 {
     var response = await client.SearchAsync<JsonElement>(s => s
-        .Indices("users")
-        .Query(q => q.Match(m => m.Field("city").Query(city)))
-        .Size(10));
-    return response.IsValidResponse
-        ? Results.Ok(response.Documents)
-        : Results.Problem("ES query failed: " + response.DebugInformation);
+        .Indices("users").Query(q => q.Match(m => m.Field("city").Query(city))).Size(10));
+    return response.IsValidResponse ? Results.Ok(response.Documents) : Results.Problem("ES query failed");
 }).WithTags("Search");
 
 app.MapGet("/products/search/{category}", async (string category, ElasticsearchClient client) =>
 {
     var response = await client.SearchAsync<JsonElement>(s => s
-        .Indices("products")
-        .Query(q => q.Match(m => m.Field("category").Query(category)))
-        .Size(10));
-    return response.IsValidResponse
-        ? Results.Ok(response.Documents)
-        : Results.Problem("ES query failed: " + response.DebugInformation);
+        .Indices("products").Query(q => q.Match(m => m.Field("category").Query(category))).Size(10));
+    return response.IsValidResponse ? Results.Ok(response.Documents) : Results.Problem("ES query failed");
 }).WithTags("Search");
 
 app.MapGet("/logs/errors", async (ElasticsearchClient client) =>
 {
     var response = await client.SearchAsync<JsonElement>(s => s
-        .Indices("logs")
-        .Query(q => q.Match(m => m.Field("level").Query("ERROR")))
-        .Size(10));
-    return response.IsValidResponse
-        ? Results.Ok(response.Documents)
-        : Results.Problem("ES query failed: " + response.DebugInformation);
+        .Indices("logs").Query(q => q.Match(m => m.Field("level").Query("ERROR"))).Size(10));
+    return response.IsValidResponse ? Results.Ok(response.Documents) : Results.Problem("ES query failed");
 }).WithTags("Search");
 
-// ── Protected Endpoints (JWT required) ────────────────────────
-app.MapGet("/projects", async (AppDbContext db) =>
-    await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync())
-    .RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+// ── Projects with Redis Cache ─────────────────────────────────
+app.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
+{
+    // Try cache first
+    var cached = await cache.GetStringAsync("projects:all");
+    if (cached is not null)
+    {
+        Log.Information("Cache HIT for projects:all");
+        return Results.Ok(JsonSerializer.Deserialize<List<Project>>(cached));
+    }
+
+    // Cache miss — query SQL
+    Log.Information("Cache MISS for projects:all — querying SQL Server");
+    var projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
+    await cache.SetStringAsync("projects:all",
+        JsonSerializer.Serialize(projects),
+        new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
+    return Results.Ok(projects);
+}).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
 
 app.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
     await db.Projects.FindAsync(id) is Project p
@@ -201,15 +244,26 @@ app.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
         : Results.NotFound(new { error = "Project not found" }))
     .RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
 
-app.MapPost("/projects", async (Project project, AppDbContext db) =>
+app.MapPost("/projects", async (Project project, AppDbContext db, IDistributedCache cache, IConnection rabbit) =>
 {
     project.CreatedAt = DateTime.UtcNow;
     db.Projects.Add(project);
     await db.SaveChangesAsync();
+
+    // Invalidate cache (data changed, cache is stale)
+    await cache.RemoveAsync("projects:all");
+
+    // Publish event to RabbitMQ for async processing
+    using var channel = rabbit.CreateModel();
+    channel.QueueDeclare("project-events", durable: true, exclusive: false, autoDelete: false);
+    var message = JsonSerializer.Serialize(new { Event = "ProjectCreated", project.Id, project.Name, Timestamp = DateTime.UtcNow });
+    channel.BasicPublish("", "project-events", null, Encoding.UTF8.GetBytes(message));
+    Log.Information("Published ProjectCreated event for {ProjectName}", project.Name);
+
     return Results.Created($"/projects/{project.Id}", project);
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
 
-app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db) =>
+app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db, IDistributedCache cache) =>
 {
     var project = await db.Projects.FindAsync(id);
     if (project is null) return Results.NotFound(new { error = "Project not found" });
@@ -218,19 +272,21 @@ app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db) =>
     project.Status = input.Status;
     project.UpdatedAt = DateTime.UtcNow;
     await db.SaveChangesAsync();
+    await cache.RemoveAsync("projects:all");
     return Results.Ok(project);
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
 
-app.MapDelete("/projects/{id}", async (int id, AppDbContext db) =>
+app.MapDelete("/projects/{id}", async (int id, AppDbContext db, IDistributedCache cache) =>
 {
     var project = await db.Projects.FindAsync(id);
     if (project is null) return Results.NotFound(new { error = "Project not found" });
     db.Projects.Remove(project);
     await db.SaveChangesAsync();
+    await cache.RemoveAsync("projects:all");
     return Results.Ok(new { message = "Deleted", id });
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
 
-// ── File Endpoints (JWT required) ─────────────────────────────
+// ── File Endpoints ────────────────────────────────────────────
 app.MapPost("/files/upload", async (HttpRequest request, IAmazonS3 s3) =>
 {
     var form = await request.ReadFormAsync();
@@ -243,6 +299,7 @@ app.MapPost("/files/upload", async (HttpRequest request, IAmazonS3 s3) =>
         BucketName = "uploads", Key = key,
         InputStream = stream, ContentType = file.ContentType
     });
+    Log.Information("File uploaded: {FileName} ({Size} bytes)", file.FileName, file.Length);
     return Results.Ok(new { message = "Uploaded", key, size = file.Length });
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Files");
 
@@ -271,9 +328,7 @@ app.MapDelete("/files/{key}", async (string key, IAmazonS3 s3) =>
     return Results.Ok(new { message = "Deleted", key });
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Files");
 
-// Prometheus
 app.MapMetrics();
-
 app.Run("http://0.0.0.0:5000");
 
 // ── Models ────────────────────────────────────────────────────
@@ -297,4 +352,43 @@ public class AppDbContext : DbContext
 {
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
     public DbSet<Project> Projects => Set<Project>();
+}
+
+public class ProjectEventConsumer : BackgroundService
+{
+    private readonly IConnection _connection;
+    private readonly ILogger<ProjectEventConsumer> _logger;
+
+    public ProjectEventConsumer(IConnection connection, ILogger<ProjectEventConsumer> logger)
+    {
+        _connection = connection;
+        _logger = logger;
+    }
+
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var channel = _connection.CreateModel();
+        channel.QueueDeclare("project-events", durable: true, exclusive: false, autoDelete: false);
+
+        var consumer = new RabbitMQ.Client.Events.EventingBasicConsumer(channel);
+        consumer.Received += (sender, args) =>
+        {
+            var body = Encoding.UTF8.GetString(args.Body.ToArray());
+            _logger.LogInformation("Consumed message: {Message}", body);
+
+            // This is where you would:
+            // 1. Index the project in Elasticsearch for search
+            // 2. Send a notification email
+            // 3. Generate a PDF report
+            // 4. Any other slow/heavy work
+
+            channel.BasicAck(args.DeliveryTag, false);
+            _logger.LogInformation("Message processed and acknowledged");
+        };
+
+        channel.BasicConsume("project-events", autoAck: false, consumer: consumer);
+        _logger.LogInformation("ProjectEventConsumer started — listening for messages");
+
+        return Task.CompletedTask;
+    }
 }
