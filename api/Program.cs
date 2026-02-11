@@ -253,7 +253,7 @@ app.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
         JsonSerializer.Serialize(projects),
         new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
     return Results.Ok(projects);
-}).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+}).RequireRateLimiting("fixed").WithTags("Projects");
 
 app.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
     await db.Projects.FindAsync(id) is Project p
@@ -279,7 +279,7 @@ app.MapPost("/projects", async (Project project, AppDbContext db, IDistributedCa
     Log.Information("Published ProjectCreated event for {ProjectName}", project.Name);
 
     return Results.Created($"/projects/{project.Id}", project);
-}).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+}).RequireRateLimiting("fixed").WithTags("Projects");
 
 app.MapGet("/projects/by-slug/{slug}", async (string slug, AppDbContext db) =>
     await db.Projects.FirstOrDefaultAsync(p => p.Slug == slug) is Project p
@@ -315,7 +315,7 @@ app.MapPut("/projects/{id}", async (int id, Project input, AppDbContext db, IDis
     await db.SaveChangesAsync();
     await cache.RemoveAsync("projects:all");
     return Results.Ok(project);
-}).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+}).RequireRateLimiting("fixed").WithTags("Projects");
 
 app.MapDelete("/projects/{id}", async (int id, AppDbContext db, IDistributedCache cache) =>
 {
@@ -325,7 +325,7 @@ app.MapDelete("/projects/{id}", async (int id, AppDbContext db, IDistributedCach
     await db.SaveChangesAsync();
     await cache.RemoveAsync("projects:all");
     return Results.Ok(new { message = "Deleted", id });
-}).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Projects");
+}).RequireRateLimiting("fixed").WithTags("Projects");
 
 // ── File Endpoints ────────────────────────────────────────────
 app.MapPost("/files/upload", async (HttpRequest request, IAmazonS3 s3) =>

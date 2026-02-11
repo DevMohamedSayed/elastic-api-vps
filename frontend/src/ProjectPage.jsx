@@ -4,16 +4,12 @@ import { useParams, Link } from 'react-router-dom'
 const API = '/api'
 
 function ProjectPage() {
-  // useParams() reads the :slug from the URL
-  // e.g., /projects/my-cool-project → slug = "my-cool-project"
   const { slug } = useParams()
-
   const [project, setProject] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    // Fetch project by slug (public endpoint - no JWT needed)
     fetch(`${API}/projects/by-slug/${slug}`)
       .then(res => {
         if (!res.ok) throw new Error('Project not found')
@@ -22,9 +18,6 @@ function ProjectPage() {
       .then(data => {
         setProject(data)
         setLoading(false)
-
-        // Fetch JSON-LD and inject into page <head>
-        // This is what Google reads to understand the page
         fetch(`${API}/projects/${slug}/meta`)
           .then(res => res.json())
           .then(jsonLd => {
@@ -32,8 +25,6 @@ function ProjectPage() {
             script.type = 'application/ld+json'
             script.text = JSON.stringify(jsonLd)
             document.head.appendChild(script)
-
-            // Update page title for SEO
             document.title = `${data.name} | Mohamed Sayed`
           })
       })
@@ -41,7 +32,7 @@ function ProjectPage() {
         setError(err.message)
         setLoading(false)
       })
-  }, [slug])  // Re-run if slug changes
+  }, [slug])
 
   if (loading) return <div className="app"><p>Loading...</p></div>
   if (error) return (
