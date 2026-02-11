@@ -41,3 +41,46 @@ td { padding: 8px; font-size: 0.85rem; border-bottom: 1px solid #1e293b; }
 .results { background: #0f172a; padding: 12px; border-radius: 6px; margin-top: 10px; font-size: 0.8rem; overflow-x: auto; max-height: 200px; overflow-y: auto; }
 
 footer { text-align: center; padding: 30px 0; color: #475569; font-size: 0.85rem; }
+/* Project Detail Page */
+.back-link {
+  color: #60a5fa;
+  text-decoration: none;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+.back-link:hover { text-decoration: underline; }
+
+.project-detail .description {
+  font-size: 1.1rem;
+  line-height: 1.8;
+  color: #ccc;
+  margin: 1rem 0 2rem;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.meta-item {
+  background: #1e293b;
+  padding: 1rem;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.meta-item strong {
+  display: block;
+  color: #60a5fa;
+  margin-bottom: 0.5rem;
+}
+
+/* Make project names clickable */
+table a {
+  color: #60a5fa;
+  text-decoration: none;
+}
+table a:hover {
+  text-decoration: underline;
+}

@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
+import ProjectPage from './ProjectPage'
+
 import './App.css'
 
 const API = '/api'
@@ -105,7 +108,7 @@ function App() {
             <tbody>
               {projects.map(p => (
                 <tr key={p.id}>
-                  <td>{p.name}</td>
+                  <td><Link to={`/projects/${p.slug}`}>{p.name}</Link></td>
                   <td>{p.description}</td>
                   <td><span className={`status ${p.status.toLowerCase()}`}>{p.status}</span></td>
                   <td>{new Date(p.createdAt).toLocaleDateString()}</td>
@@ -161,4 +164,16 @@ function App() {
   )
 }
 
-export default App
+function Root() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<App />} />
+        <Route path="/projects/:slug" element={<ProjectPage />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+export default Root
+
