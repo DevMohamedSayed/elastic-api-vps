@@ -369,6 +369,48 @@ app.MapDelete("/files/{key}", async (string key, IAmazonS3 s3) =>
     return Results.Ok(new { message = "Deleted", key });
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Files");
 
+// ── Server-Side Rendered page for SEO bots ──────────────────
+app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
+{
+    var project = await db.Projects.FirstOrDefaultAsync(p => p.Slug == slug);
+    if (project is null) return Results.NotFound("Project not found");
+
+    var html = $@"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+    <meta charset=""utf-8"" />
+    <title>{project.Name} | Mohamed Sayed</title>
+    <meta name=""description"" content=""{project.Description}"" />
+    <meta property=""og:title"" content=""{project.Name}"" />
+    <meta property=""og:description"" content=""{project.Description}"" />
+    <meta property=""og:url"" content=""https://mohamedsayed.site/projects/{project.Slug}"" />
+    <meta property=""og:type"" content=""article"" />
+    <script type=""application/ld+json"">
+    {{
+        ""@context"": ""https://schema.org"",
+        ""@type"": ""Article"",
+        ""headline"": ""{project.Name}"",
+        ""description"": ""{project.Description}"",
+        ""url"": ""https://mohamedsayed.site/projects/{project.Slug}"",
+        ""datePublished"": ""{project.CreatedAt:yyyy-MM-dd}"",
+        ""author"": {{
+            ""@type"": ""Person"",
+            ""name"": ""Mohamed Sayed""
+        }}
+    }}
+    </script>
+</head>
+<body>
+    <h1>{project.Name}</h1>
+    <p>{project.Description}</p>
+    <p>Status: {project.Status}</p>
+    <p>Created: {project.CreatedAt:yyyy-MM-dd}</p>
+    <a href=""https://mohamedsayed.site"">Back to Home</a>
+</body>
+</html>";
+    return Results.Content(html, "text/html");
+}).WithTags("SEO");
+
 app.MapMetrics();
 app.Run("http://0.0.0.0:5000");
 
