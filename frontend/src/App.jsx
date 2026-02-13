@@ -44,7 +44,7 @@ function App() {
 
   // ── File Upload ──
   const loadFiles = async () => {
-    const res = await fetch(`${API}/files`)
+    const res = await fetch(`${API}/files`, { headers: { Authorization: `Bearer ${token}` } })
     setFiles(await res.json())
   }
 
@@ -87,6 +87,8 @@ function App() {
           return <div key={name} className="stack-card"><strong>{name}</strong><span>{desc}</span></div>
         })}
       </div>
+
+      <Login onLogin={(t) => setToken(t)} />
 
       {/* Projects Section */}
       <section className="card">

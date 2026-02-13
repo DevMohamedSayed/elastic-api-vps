@@ -40,6 +40,7 @@ var jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET") ?? "MyS3cur3K3y!20
 var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
 
 // Swagger
+builder.Services.AddHttpClient();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -167,8 +168,27 @@ using (var scope = app.Services.CreateScope())
 }
 
 // ── Auth ──────────────────────────────────────────────────────
-app.MapPost("/auth/login", (LoginRequest request) =>
+app.MapPost("/auth/login", async (LoginRequest request, IHttpClientFactory httpFactory) =>
 {
+    // Validate Turnstile token with Cloudflare
+    if (!string.IsNullOrEmpty(request.TurnstileToken))
+    {
+        var http = httpFactory.CreateClient();
+        var turnstileResponse = await http.PostAsync("https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                { "secret", Environment.GetEnvironmentVariable("TURNSTILE_SECRET") ?? "0x4AAAAAAACb7QUP56Cj_TqVhCKp4oh8ByzI" },
+                { "response", request.TurnstileToken }
+            }));
+        var result = await turnstileResponse.Content.ReadAsStringAsync();
+        if (!result.Contains("\"success\":true"))
+        {
+            Log.Warning("Turnstile verification failed");
+            return Results.BadRequest(new { error = "Bot verification failed" });
+        }
+        Log.Information("Turnstile verification passed");
+    }
+
     if (request.Username == "admin" && request.Password == "Admin2026!")
     {
         var claims = new[]
@@ -460,6 +480,7 @@ public class LoginRequest
 {
     public string Username { get; set; } = "";
     public string Password { get; set; } = "";
+    public string TurnstileToken { get; set; } = "";
 }
 
 public class AppDbContext : DbContext
