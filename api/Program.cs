@@ -369,7 +369,7 @@ app.MapDelete("/files/{key}", async (string key, IAmazonS3 s3) =>
     return Results.Ok(new { message = "Deleted", key });
 }).RequireAuthorization().RequireRateLimiting("fixed").WithTags("Files");
 
-// ── Server-Side Rendered page for SEO bots ──────────────────
+// ── Server-Side Rendered page with SEO + React SPA ──────────
 app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
 {
     var project = await db.Projects.FirstOrDefaultAsync(p => p.Slug == slug);
@@ -379,6 +379,7 @@ app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
 <html lang=""en"">
 <head>
     <meta charset=""utf-8"" />
+    <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"" />
     <title>{project.Name} | Mohamed Sayed</title>
     <meta name=""description"" content=""{project.Description}"" />
     <meta property=""og:title"" content=""{project.Name}"" />
@@ -401,11 +402,32 @@ app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
     </script>
 </head>
 <body>
-    <h1>{project.Name}</h1>
-    <p>{project.Description}</p>
-    <p>Status: {project.Status}</p>
-    <p>Created: {project.CreatedAt:yyyy-MM-dd}</p>
-    <a href=""https://mohamedsayed.site"">Back to Home</a>
+    <div id=""root""></div>
+    <noscript>
+        <h1>{project.Name}</h1>
+        <p>{project.Description}</p>
+        <p>Status: {project.Status}</p>
+        <a href=""https://mohamedsayed.site"">Back to Home</a>
+    </noscript>
+    <script>
+        // Load React app dynamically
+        fetch(/).then(r => r.text()).then(html => {{
+            var match = html.match(/src=""([^""]*\.js)""/);
+            var cssMatch = html.match(/href=""([^""]*\.css)""/);
+            if (cssMatch) {{
+                var link = document.createElement(link);
+                link.rel = stylesheet;
+                link.href = cssMatch[1];
+                document.head.appendChild(link);
+            }}
+            if (match) {{
+                var script = document.createElement(script);
+                script.type = module;
+                script.src = match[1];
+                document.body.appendChild(script);
+            }}
+        }});
+    </script>
 </body>
 </html>";
     return Results.Content(html, "text/html");
