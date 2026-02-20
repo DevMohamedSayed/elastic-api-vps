@@ -24,7 +24,7 @@ jobs:
           docker push ghcr.io/${{ github.repository }}/api:latest
           docker push ghcr.io/${{ github.repository }}/api:${{ github.sha }}
 
-      - name: Deploy to VPS
+      - name: Zero-Downtime Deploy to VPS
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -32,5 +32,16 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /home/mohammed/compose-stack
-            docker compose pull
-            docker compose up -d
+            git pull origin main
+            cd frontend && npm install && npm run build && cd ..
+            docker compose build api
+            docker compose up -d api
+            echo Waiting for healthy API...
+            for i in $(seq 1 20); do
+              STATUS=$(docker inspect --format={{.State.Health.Status}} compose-stack-api-1 2>/dev/null || echo unknown)
+              [ "$STATUS" = "healthy" ] && echo "Healthy after $((i*3))s!" && break
+              echo "  $STATUS... (attempt $i/20)"
+              sleep 3
+            done
+            docker compose exec nginx nginx -s reload
+            echo "Deploy complete!"

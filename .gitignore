@@ -4,3 +4,7 @@ api/obj/
 *.bak.*
 .DS_Store
 Thumbs.db
+secrets/
+*.save
+docker-compose.yml.backup
+uptime-check.sh

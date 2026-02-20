@@ -17,6 +17,14 @@ using RabbitMQ.Client;
 using Serilog;
 using Serilog.Sinks.Elasticsearch;
 
+// ── Helper: Read Docker Secret ──────────────────────────────────
+string ReadSecret(string name, string fallback)
+{
+    var path = "/run/secrets/" + name;
+    try { return File.Exists(path) ? File.ReadAllText(path).Trim() : fallback; }
+    catch { return fallback; }
+}
+
 // ── Serilog Setup (replaces default logger) ────────────────────
 var esUrl = Environment.GetEnvironmentVariable("ELASTICSEARCH_URL") ?? "http://localhost:9200";
 
@@ -36,11 +44,10 @@ Log.Logger = new LoggerConfiguration()
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog();
 
-var jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET") ?? "MyS3cur3K3y!2026VPS-Pr0ject!!XYZ";
+var jwtKey = ReadSecret("jwt_secret", Environment.GetEnvironmentVariable("JWT_SECRET") ?? "MyS3cur3K3y!2026VPS-Pr0ject!!XYZ");
 var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
 
 // Swagger
-builder.Services.AddHttpClient();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -168,46 +175,38 @@ using (var scope = app.Services.CreateScope())
 }
 
 // ── Auth ──────────────────────────────────────────────────────
-app.MapPost("/auth/login", async (LoginRequest request, IHttpClientFactory httpFactory) =>
+app.MapPost("/auth/login", async (LoginRequest request) =>
 {
-    // Validate Turnstile token with Cloudflare
+    // Validate Turnstile
     if (!string.IsNullOrEmpty(request.TurnstileToken))
     {
-        var http = httpFactory.CreateClient();
-        var turnstileResponse = await http.PostAsync("https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        using var http = new HttpClient();
+        var turnstileResp = await http.PostAsync("https://challenges.cloudflare.com/turnstile/v0/siteverify",
             new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                { "secret", Environment.GetEnvironmentVariable("TURNSTILE_SECRET") ?? "0x4AAAAAAACb7QUP56Cj_TqVhCKp4oh8ByzI" },
+                { "secret", Environment.GetEnvironmentVariable("TURNSTILE_SECRET") ?? "0x4AAAAAACcYJRUVyJs5SkMtiqkrjf62RdY" },
                 { "response", request.TurnstileToken }
             }));
-        var result = await turnstileResponse.Content.ReadAsStringAsync();
-        if (!result.Contains("\"success\":true"))
+        var result = await turnstileResp.Content.ReadAsStringAsync();
+        Log.Information("Turnstile: {Result}", result);
+        if (!result.Contains("true"))
         {
-            Log.Warning("Turnstile verification failed");
-            return Results.BadRequest(new { error = "Bot verification failed" });
+            Log.Warning("Turnstile failed");
+            return Results.BadRequest(new { error = "Bot check failed" });
         }
-        Log.Information("Turnstile verification passed");
     }
 
-    if (request.Username == "admin" && request.Password == "Admin2026!")
+    if (request.Username?.Trim() == "admin" && request.Password?.Trim() == "Admin2026!")
     {
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.Name, request.Username),
-            new Claim(ClaimTypes.Role, "Admin")
-        };
+        var claims = new[] { new Claim(ClaimTypes.Name, request.Username), new Claim(ClaimTypes.Role, "Admin") };
         var token = new JwtSecurityToken(
-            issuer: "mohamedsayed.site",
-            audience: "mohamedsayed.site",
-            claims: claims,
+            issuer: "mohamedsayed.site", audience: "mohamedsayed.site", claims: claims,
             expires: DateTime.UtcNow.AddHours(24),
-            signingCredentials: new SigningCredentials(
-                new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256)
-        );
-        Log.Information("User {Username} logged in", request.Username);
+            signingCredentials: new SigningCredentials(new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256));
+        Log.Information("User {U} logged in", request.Username);
         return Results.Ok(new { token = new JwtSecurityTokenHandler().WriteToken(token) });
     }
-    Log.Warning("Failed login attempt for {Username}", request.Username);
+    Log.Warning("Failed login for {U}", request.Username);
     return Results.Unauthorized();
 }).WithTags("Auth");
 
@@ -452,6 +451,71 @@ app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
 </html>";
     return Results.Content(html, "text/html");
 }).WithTags("SEO");
+
+
+// ── API Versioning ─────────────────────────────────────────────
+// V1 = stable, simple responses (what clients use today)
+// V2 = enhanced responses with metadata (new clients use this)
+var v1 = app.MapGroup("/v1").WithTags("v1 - Stable");
+var v2 = app.MapGroup("/v2").WithTags("v2 - Enhanced");
+
+// V1: Simple project list (same as existing /projects)
+v1.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
+{
+    var cached = await cache.GetStringAsync("projects:all");
+    if (cached is not null)
+    {
+        Log.Information("[v1] Cache HIT");
+        return Results.Ok(JsonSerializer.Deserialize<List<Project>>(cached));
+    }
+    var projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
+    await cache.SetStringAsync("projects:all", JsonSerializer.Serialize(projects),
+        new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
+    return Results.Ok(projects);
+}).RequireRateLimiting("fixed");
+
+// V2: Enhanced project list with metadata
+v2.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
+{
+    var cached = await cache.GetStringAsync("projects:all");
+    bool fromCache = cached is not null;
+    List<Project> projects;
+    if (fromCache)
+        projects = JsonSerializer.Deserialize<List<Project>>(cached!)!;
+    else
+    {
+        projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
+        await cache.SetStringAsync("projects:all", JsonSerializer.Serialize(projects),
+            new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
+    }
+    Log.Information("[v2] Projects fetched. FromCache={FromCache}", fromCache);
+    return Results.Ok(new
+    {
+        version = "2.0",
+        totalCount = projects.Count,
+        fromCache = fromCache,
+        generatedAt = DateTime.UtcNow,
+        data = projects
+    });
+}).RequireRateLimiting("fixed");
+
+// V2: Single project with full audit info
+v2.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
+{
+    var project = await db.Projects.FindAsync(id);
+    if (project is null) return Results.NotFound(new { error = "Project not found", version = "2.0" });
+    return Results.Ok(new
+    {
+        version = "2.0",
+        data = project,
+        links = new
+        {
+            self = $"/api/v2/projects/{project.Id}",
+            slug = $"/projects/by-slug/{project.Slug}",
+            meta = $"/projects/{project.Slug}/meta"
+        }
+    });
+}).RequireAuthorization().RequireRateLimiting("fixed");
 
 app.MapMetrics();
 app.Run("http://0.0.0.0:5000");
