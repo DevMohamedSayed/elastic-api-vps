@@ -142,6 +142,7 @@ builder.Services.AddSingleton<IConnection>(_ =>
 });
 
 builder.Services.AddHostedService<ProjectEventConsumer>();
+builder.Services.AddSingleton<SseConnectionManager>();
 // Health Checks
 builder.Services.AddHealthChecks()
     .AddSqlServer(sqlConn, name: "sqlserver")
@@ -184,7 +185,7 @@ app.MapPost("/auth/login", async (LoginRequest request) =>
         var turnstileResp = await http.PostAsync("https://challenges.cloudflare.com/turnstile/v0/siteverify",
             new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                { "secret", Environment.GetEnvironmentVariable("TURNSTILE_SECRET") ?? "0x4AAAAAACcYJRUVyJs5SkMtiqkrjf62RdY" },
+                { "secret", Environment.GetEnvironmentVariable("TURNSTILE_SECRET") ?? "" },
                 { "response", request.TurnstileToken }
             }));
         var result = await turnstileResp.Content.ReadAsStringAsync();
@@ -452,70 +453,28 @@ app.MapGet("/projects/{slug}/page", async (string slug, AppDbContext db) =>
     return Results.Content(html, "text/html");
 }).WithTags("SEO");
 
-
-// ── API Versioning ─────────────────────────────────────────────
-// V1 = stable, simple responses (what clients use today)
-// V2 = enhanced responses with metadata (new clients use this)
-var v1 = app.MapGroup("/v1").WithTags("v1 - Stable");
-var v2 = app.MapGroup("/v2").WithTags("v2 - Enhanced");
-
-// V1: Simple project list (same as existing /projects)
-v1.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
+app.MapGet("/events", async (HttpContext ctx, SseConnectionManager sse) =>
 {
-    var cached = await cache.GetStringAsync("projects:all");
-    if (cached is not null)
-    {
-        Log.Information("[v1] Cache HIT");
-        return Results.Ok(JsonSerializer.Deserialize<List<Project>>(cached));
-    }
-    var projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
-    await cache.SetStringAsync("projects:all", JsonSerializer.Serialize(projects),
-        new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
-    return Results.Ok(projects);
-}).RequireRateLimiting("fixed");
+    ctx.Response.Headers["Content-Type"] = "text/event-stream";
+    ctx.Response.Headers["Cache-Control"] = "no-cache";
+    ctx.Response.Headers["X-Accel-Buffering"] = "no";
 
-// V2: Enhanced project list with metadata
-v2.MapGet("/projects", async (AppDbContext db, IDistributedCache cache) =>
-{
-    var cached = await cache.GetStringAsync("projects:all");
-    bool fromCache = cached is not null;
-    List<Project> projects;
-    if (fromCache)
-        projects = JsonSerializer.Deserialize<List<Project>>(cached!)!;
-    else
-    {
-        projects = await db.Projects.OrderByDescending(p => p.CreatedAt).ToListAsync();
-        await cache.SetStringAsync("projects:all", JsonSerializer.Serialize(projects),
-            new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(60) });
-    }
-    Log.Information("[v2] Projects fetched. FromCache={FromCache}", fromCache);
-    return Results.Ok(new
-    {
-        version = "2.0",
-        totalCount = projects.Count,
-        fromCache = fromCache,
-        generatedAt = DateTime.UtcNow,
-        data = projects
-    });
-}).RequireRateLimiting("fixed");
+    var id = Guid.NewGuid().ToString();
+    sse.AddConnection(id, ctx.Response);
+    Log.Information("SSE client connected: {Id}", id);
 
-// V2: Single project with full audit info
-v2.MapGet("/projects/{id}", async (int id, AppDbContext db) =>
-{
-    var project = await db.Projects.FindAsync(id);
-    if (project is null) return Results.NotFound(new { error = "Project not found", version = "2.0" });
-    return Results.Ok(new
-    {
-        version = "2.0",
-        data = project,
-        links = new
-        {
-            self = $"/api/v2/projects/{project.Id}",
-            slug = $"/projects/by-slug/{project.Slug}",
-            meta = $"/projects/{project.Slug}/meta"
-        }
-    });
-}).RequireAuthorization().RequireRateLimiting("fixed");
+    await ctx.Response.WriteAsync("event: connected" + "
+" + "data: {"status":"ok"}" + "
+
+");
+    await ctx.Response.Body.FlushAsync();
+
+    var tcs = new TaskCompletionSource();
+    ctx.RequestAborted.Register(() => tcs.TrySetResult());
+    await tcs.Task;
+
+    sse.RemoveConnection(id);
+}).WithTags("Events");
 
 app.MapMetrics();
 app.Run("http://0.0.0.0:5000");
@@ -589,5 +548,41 @@ public class ProjectEventConsumer : BackgroundService
         _logger.LogInformation("ProjectEventConsumer started — listening for messages");
 
         return Task.CompletedTask;
+    }
+}
+
+public class SseConnectionManager
+{
+    private readonly List<(string Id, HttpResponse Response)> _connections = new();
+    private readonly object _lock = new();
+
+    public void AddConnection(string id, HttpResponse response)
+    {
+        lock (_lock) _connections.Add((id, response));
+    }
+
+    public void RemoveConnection(string id)
+    {
+        lock (_lock) _connections.RemoveAll(c => c.Id == id);
+    }
+
+    public async Task BroadcastAsync(string eventName, string data)
+    {
+        List<(string Id, HttpResponse Response)> snapshot;
+        lock (_lock) snapshot = new(_connections);
+
+        foreach (var (id, response) in snapshot)
+        {
+            try
+            {
+                await response.WriteAsync("event: " + eventName + "\n");
+                await response.WriteAsync("data: " + data + "\n\n");
+                await response.Body.FlushAsync();
+            }
+            catch
+            {
+                RemoveConnection(id);
+            }
+        }
     }
 }
