@@ -1,0 +1,16 @@
+replicaCount: 2
+
+image:
+  repository: nginx
+  tag: "1.25"
+
+service:
+  port: 80
+  targetPort: 80
+
+ingress:
+  host: devops.mohamedsayed.site
+
+config:
+  appEnv: production
+  logLevel: info
